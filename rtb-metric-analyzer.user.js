@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RTB Metric Performance Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      1.3.0
+// @version      1.4.0
 // @description  Analyzes RTB metric performance, provides recommendations, summarizes comments, and identifies trends.
 // @author       jenbre
 // @match        https://rtb.ars-pe.amazon.dev/*
@@ -816,7 +816,7 @@
       // Strategy 1: Look for RTB "Action Plan Comments" tab content
       // The RTB page has tabs: Current Action Plans | Future Action Plans | Action Plan Comments | Resolved Action Plans
       const allText = document.body.textContent;
-      
+
       // Look for comment sections specific to RTB
       const commentContainers = document.querySelectorAll(
         '[class*="comment"], [class*="note"], [class*="annotation"],' +
@@ -836,9 +836,9 @@
         if (!this.isElementVisible(table)) return;
         const headers = Array.from(table.querySelectorAll('thead th, tr:first-child th, tr:first-child td'))
           .map(c => c.textContent.trim().toLowerCase());
-        
+
         // Check if this is a comments table
-        const isCommentTable = headers.some(h => 
+        const isCommentTable = headers.some(h =>
           h.includes('comment') || h.includes('note') || h.includes('update') || h.includes('description')
         );
         if (!isCommentTable) return;
@@ -876,7 +876,7 @@
         if (text.length < 10 || text.length > 2000) return;
         // Skip if it looks like the main table data
         if (text.match(/^(Open|Closed|Variation Reduction|Road To Benchmark)/)) return;
-        
+
         const comment = this.parseComment(el);
         if (comment) this.comments.push(comment);
       });
@@ -2109,7 +2109,27 @@
             <h3 style="color:#ff9900;margin:0;">Weekly Summary — ${siteLabel}</h3>
             <p style="color:#888;font-size:12px;margin:4px 0 0;">Generated ${dateStr}</p>
           </div>
-          <button id="rtb-copy-summary-btn" class="rtb-export-btn">📋 Copy for Word</button>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <select id="rtb-day-site-selector" style="background:#0f3460;color:#ff9900;border:1px solid #ff9900;border-radius:4px;padding:6px 10px;font-size:12px;cursor:pointer;">
+              <option value="OLM1">OLM1</option>
+              <option value="SBD3">SBD3</option>
+              <option value="SCK8">SCK8</option>
+            </select>
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;">
+          <button class="rtb-export-btn rtb-day-btn" data-day="monday" style="background:#0f3460;border:1px solid #3498db;font-size:12px;padding:8px 14px;">
+            📋 MON — Sr Leader Review
+          </button>
+          <button class="rtb-export-btn rtb-day-btn" data-day="tuesday" style="background:#0f3460;border:1px solid #27ae60;font-size:12px;padding:8px 14px;">
+            📋 TUE — Cost Doc
+          </button>
+          <button class="rtb-export-btn rtb-day-btn" data-day="wednesday" style="background:#0f3460;border:1px solid #2ecc71;font-size:12px;padding:8px 14px;">
+            📋 WED — OM Sync
+          </button>
+          <button class="rtb-export-btn rtb-day-btn" data-day="friday" style="background:#0f3460;border:1px solid #e74c3c;font-size:12px;padding:8px 14px;">
+            📋 FRI — Regional Flash
+          </button>
         </div>`;
 
       // Overall Progress Cards
@@ -2158,9 +2178,14 @@
 
       document.getElementById('sec-recommendations').innerHTML = html;
 
-      // Bind copy button
-      document.getElementById('rtb-copy-summary-btn')?.addEventListener('click', () => {
-        this.copyWeeklySummaryToClipboard(summary, siteLabel);
+      // Bind day-specific copy buttons
+      document.querySelectorAll('.rtb-day-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const day = btn.dataset.day;
+          const siteSel = document.getElementById('rtb-day-site-selector');
+          const site = siteSel ? siteSel.value : siteLabel;
+          this.copyDayFormat(day, summary, site, btn);
+        });
       });
     }
 
@@ -2629,13 +2654,456 @@
       return insight;
     }
 
+    // ============================================================
+    // DAY-SPECIFIC COPY FORMATS
+    // ============================================================
+    copyDayFormat(day, summary, site, btn) {
+      const origText = btn.textContent;
+      btn.textContent = '⏳ Rendering...';
+      btn.disabled = true;
+
+      // For Friday, use the full regional format (existing behavior)
+      if (day === 'friday') {
+        const siteLabel = this._activeSite === 'NXSD' ? 'NXSD' : site;
+        this.copyWeeklySummaryToClipboard(summary, siteLabel);
+        // Reset button state after a delay (copyWeeklySummaryToClipboard has its own btn handling)
+        return;
+      }
+
+      // For MON/TUE/WED, filter data to the selected site
+      const siteMetrics = summary.wowChanges.filter(w => {
+        const match = w.name.match(/\(([A-Z0-9]+)\)\s*$/);
+        const metricSite = match ? match[1] : site;
+        return metricSite === site;
+      });
+      const siteActions = (summary.actions || []).filter(a => {
+        const match = (a.metric || '').match(/\(([A-Z0-9]+)\)\s*$/);
+        const actionSite = match ? match[1] : site;
+        return actionSite === site;
+      });
+      const siteComments = (this._cachedComments || []).filter(c => {
+        const match = (c.metric || '').match(/\(([A-Z0-9]+)\)\s*$/);
+        const commentSite = match ? match[1] : site;
+        return commentSite === site;
+      });
+      const siteTrends = (this._cachedTrends || []).filter(t => {
+        return (t.path === site || t.site === site);
+      });
+
+      const dateStr = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+      let visualHtml = '';
+
+      if (day === 'monday') {
+        visualHtml = this.buildMondayVisual(site, dateStr, siteMetrics, siteActions);
+      } else if (day === 'tuesday') {
+        visualHtml = this.buildTuesdayVisual(site, dateStr, siteMetrics, siteActions);
+      } else if (day === 'wednesday') {
+        visualHtml = this.buildWednesdayVisual(site, dateStr, siteMetrics, siteActions, siteComments, siteTrends);
+      }
+
+      // Render and capture as image
+      const container = document.createElement('div');
+      container.style.cssText = 'position:fixed;left:-9999px;top:0;z-index:-1;width:768px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;';
+      container.innerHTML = visualHtml;
+      document.body.appendChild(container);
+
+      setTimeout(async () => {
+        try {
+          const canvas = await html2canvas(container, {
+            backgroundColor: '#1a1a2e',
+            scale: 2,
+            useCORS: true,
+            logging: false,
+            width: 768,
+          });
+          document.body.removeChild(container);
+          canvas.toBlob(async (blob) => {
+            if (blob && navigator.clipboard && navigator.clipboard.write) {
+              try {
+                await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+                btn.textContent = '✅ Copied! Ctrl+V in Word';
+                btn.disabled = false;
+                setTimeout(() => { btn.textContent = origText; }, 3000);
+              } catch (clipErr) {
+                this.openScreenshotInTab(canvas);
+                btn.textContent = '✅ Opened in tab';
+                btn.disabled = false;
+                setTimeout(() => { btn.textContent = origText; }, 3000);
+              }
+            } else {
+              this.openScreenshotInTab(canvas);
+              btn.textContent = '✅ Opened in tab';
+              btn.disabled = false;
+              setTimeout(() => { btn.textContent = origText; }, 3000);
+            }
+          }, 'image/png');
+        } catch (err) {
+          console.error('[RTB Analyzer] Day format render error:', err);
+          document.body.removeChild(container);
+          btn.textContent = '❌ Failed';
+          btn.disabled = false;
+          setTimeout(() => { btn.textContent = origText; }, 3000);
+        }
+      }, 100);
+    }
+
+    // --- MONDAY: Sr Leader Review (detailed actions + metrics) ---
+    buildMondayVisual(site, dateStr, metrics, actions) {
+      const stripSite = (name) => name.replace(/\s*\([A-Z0-9]+\)\s*$/, '');
+      const behind = metrics.filter(m => m.status === 'critical' || m.status === 'warning');
+      const ahead = metrics.filter(m => m.status === 'on-track' || m.status === 'exceeding');
+
+      let html = `<div style="background:#1a1a2e;color:#eee;padding:16px 20px;width:728px;min-height:600px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:11px;line-height:1.3;">`;
+
+      // Header
+      html += `<div style="border-bottom:2px solid #3498db;padding-bottom:8px;margin-bottom:10px;">
+        <div style="font-size:15px;font-weight:bold;color:#3498db;">📋 Monday Sr Leader Review — ${site}</div>
+        <div style="font-size:9px;color:#888;margin-top:2px;">${dateStr}</div>
+      </div>`;
+
+      // Summary line
+      html += `<div style="display:flex;gap:6px;margin-bottom:12px;">
+        <div style="flex:1;background:#16213e;border-radius:6px;padding:8px 4px;text-align:center;border:1px solid #2a2a4a;">
+          <div style="font-size:18px;font-weight:bold;color:#ff9900;">${metrics.length}</div>
+          <div style="font-size:8px;color:#aaa;">Total Metrics</div>
+        </div>
+        <div style="flex:1;background:#16213e;border-radius:6px;padding:8px 4px;text-align:center;border:1px solid #2a2a4a;">
+          <div style="font-size:18px;font-weight:bold;color:#27ae60;">${ahead.length}</div>
+          <div style="font-size:8px;color:#aaa;">Ahead</div>
+        </div>
+        <div style="flex:1;background:#16213e;border-radius:6px;padding:8px 4px;text-align:center;border:1px solid #2a2a4a;">
+          <div style="font-size:18px;font-weight:bold;color:#e74c3c;">${behind.length}</div>
+          <div style="font-size:8px;color:#aaa;">Behind</div>
+        </div>
+        <div style="flex:1;background:#16213e;border-radius:6px;padding:8px 4px;text-align:center;border:1px solid #2a2a4a;">
+          <div style="font-size:18px;font-weight:bold;color:#3498db;">${actions.length}</div>
+          <div style="font-size:8px;color:#aaa;">Actions</div>
+        </div>
+        <div style="flex:1;background:#16213e;border-radius:6px;padding:8px 4px;text-align:center;border:1px solid #2a2a4a;">
+          <div style="font-size:18px;font-weight:bold;color:#e74c3c;">${actions.filter(a => !a.status?.match(/complete|closed|done/i) && a.dueDate && (() => { try { return new Date(a.dueDate) < new Date(); } catch(e) { return false; } })()).length}</div>
+          <div style="font-size:8px;color:#aaa;">Past Due</div>
+        </div>
+      </div>`;
+
+      // Full metrics table with actions
+      html += `<div style="font-size:12px;font-weight:bold;color:#ff9900;margin-bottom:6px;">Metric Performance & Actions</div>`;
+      html += `<table style="width:100%;border-collapse:collapse;font-size:10px;margin-bottom:10px;">`;
+      html += `<tr style="background:#0f3460;">
+        <th style="padding:5px 6px;text-align:left;color:#ff9900;font-size:9px;">Metric</th>
+        <th style="padding:5px 4px;text-align:center;color:#ff9900;font-size:9px;">Value</th>
+        <th style="padding:5px 4px;text-align:center;color:#ff9900;font-size:9px;">Target</th>
+        <th style="padding:5px 4px;text-align:center;color:#ff9900;font-size:9px;">Status</th>
+        <th style="padding:5px 4px;text-align:center;color:#ff9900;font-size:9px;">WoW</th>
+        <th style="padding:5px 4px;text-align:left;color:#ff9900;font-size:9px;">Owner</th>
+      </tr>`;
+
+      metrics.forEach((w, idx) => {
+        const bg = idx % 2 === 0 ? '#1a1a2e' : '#16213e';
+        const displayName = stripSite(w.name);
+        const wowStr = w.change != null ? (w.change > 0 ? `+${w.change.toFixed(2)}%` : `${w.change.toFixed(2)}%`) : '—';
+        const wowColor = (w.change ?? 0) > 0 ? '#2ecc71' : (w.change ?? 0) < 0 ? '#e74c3c' : '#888';
+        const statusColors = { critical: '#e74c3c', warning: '#f39c12', 'on-track': '#27ae60', exceeding: '#2ecc71' };
+        const statusColor = statusColors[w.status] || '#888';
+
+        let statusHtml = '';
+        if (w.pctToTarget && w.pctToTarget.direction) {
+          const dir = w.pctToTarget.direction;
+          const pct = w.pctToTarget.percentage != null ? w.pctToTarget.percentage.toFixed(2) + '%' : '';
+          statusHtml = `<span style="color:${dir === 'ahead' ? '#27ae60' : '#e74c3c'};font-size:9px;">${dir} ${pct}</span>`;
+        } else {
+          statusHtml = `<span style="color:${statusColor};font-size:9px;font-weight:bold;">${(w.status || '?').toUpperCase()}</span>`;
+        }
+
+        html += `<tr style="background:${bg};">
+          <td style="padding:4px 6px;border-bottom:1px solid #2a2a4a;color:#eee;font-weight:bold;">${displayName}</td>
+          <td style="padding:4px 4px;border-bottom:1px solid #2a2a4a;text-align:center;color:#eee;">${w.current != null ? w.current.toFixed(2) : '—'}</td>
+          <td style="padding:4px 4px;border-bottom:1px solid #2a2a4a;text-align:center;color:#ccc;">${w.target ?? '—'}</td>
+          <td style="padding:4px 4px;border-bottom:1px solid #2a2a4a;text-align:center;">${statusHtml}</td>
+          <td style="padding:4px 4px;border-bottom:1px solid #2a2a4a;text-align:center;color:${wowColor};">${wowStr}</td>
+          <td style="padding:4px 6px;border-bottom:1px solid #2a2a4a;color:#ccc;">${w.siteOwner || w.owner || '—'}</td>
+        </tr>`;
+
+        // Actions for this metric
+        const metricActions = actions.filter(a => a.metric === w.name);
+        if (metricActions.length > 0) {
+          html += `<tr style="background:${bg};">
+            <td colspan="6" style="padding:2px 6px 6px 20px;border-bottom:1px solid #2a2a4a;">`;
+          metricActions.forEach(a => {
+            const isComplete = a.status?.match(/complete|closed|done/i);
+            const isPastDue = !isComplete && a.dueDate && (() => { try { return new Date(a.dueDate) < new Date(); } catch(e) { return false; } })();
+            const borderColor = isPastDue ? '#e74c3c' : isComplete ? '#27ae60' : '#3498db';
+            const statusTag = isComplete ? `<span style="font-size:7px;color:#27ae60;"> [complete]</span>` : isPastDue ? `<span style="font-size:7px;color:#e74c3c;font-weight:bold;"> ⚠ PAST DUE</span>` : '';
+            const desc = a.description ? this.summarizeActionText(a.description, 40) : '';
+            html += `<div style="font-size:9px;color:#ccc;margin:2px 0;padding:2px 8px;border-left:2px solid ${borderColor};${isPastDue ? 'background:#3d1515;border-radius:2px;' : ''}">
+              <span style="color:#eee;font-weight:bold;">${(a.name || 'Unnamed')}</span>${statusTag}
+              <span style="font-size:8px;color:#999;"> — ${a.assignee || '?'}${a.dueDate ? ` | Due: ${a.dueDate}` : ''}</span>
+              ${desc ? `<div style="color:#aaa;font-size:8px;margin-top:1px;">${desc}</div>` : ''}
+            </div>`;
+          });
+          html += `</td></tr>`;
+        }
+      });
+      html += `</table>`;
+
+      // Footer
+      html += `<div style="margin-top:10px;font-size:8px;color:#555;border-top:1px solid #2a2a4a;padding-top:4px;">Generated by RTB Metric Performance Analyzer — Monday Sr Leader Review</div>`;
+      html += `</div>`;
+      return html;
+    }
+
+    // --- TUESDAY: Cost Doc (similar to weekly summary, single site) ---
+    buildTuesdayVisual(site, dateStr, metrics, actions) {
+      const stripSite = (name) => name.replace(/\s*\([A-Z0-9]+\)\s*$/, '');
+      const behind = metrics.filter(m => m.status === 'critical' || m.status === 'warning');
+      const ahead = metrics.filter(m => m.status === 'on-track' || m.status === 'exceeding');
+      const improving = metrics.filter(m => (m.change ?? 0) > 0);
+      const declining = metrics.filter(m => (m.change ?? 0) < 0);
+
+      let html = `<div style="background:#1a1a2e;color:#eee;padding:16px 20px;width:728px;min-height:600px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:11px;line-height:1.3;">`;
+
+      // Header
+      html += `<div style="border-bottom:2px solid #27ae60;padding-bottom:8px;margin-bottom:10px;">
+        <div style="font-size:15px;font-weight:bold;color:#27ae60;">💰 Tuesday Cost Doc — ${site}</div>
+        <div style="font-size:9px;color:#888;margin-top:2px;">${dateStr}</div>
+      </div>`;
+
+      // Stat cards
+      html += `<div style="display:flex;gap:6px;margin-bottom:12px;">`;
+      const statCards = [
+        { value: metrics.length, label: 'Total Metrics', color: '#ff9900' },
+        { value: ahead.length, label: 'Ahead', color: '#27ae60' },
+        { value: behind.length, label: 'Behind', color: '#e74c3c' },
+        { value: improving.length, label: '↑ WoW', color: '#2ecc71' },
+        { value: declining.length, label: '↓ WoW', color: '#e74c3c' },
+      ];
+      statCards.forEach(c => {
+        html += `<div style="flex:1;background:#16213e;border-radius:6px;padding:8px 4px;text-align:center;border:1px solid #2a2a4a;">
+          <div style="font-size:18px;font-weight:bold;color:${c.color};">${c.value}</div>
+          <div style="font-size:8px;color:#aaa;margin-top:1px;">${c.label}</div>
+        </div>`;
+      });
+      html += `</div>`;
+
+      // Metrics table
+      html += `<div style="font-size:12px;font-weight:bold;color:#ff9900;margin-bottom:6px;">Metric Details</div>`;
+      html += `<table style="width:100%;border-collapse:collapse;font-size:10px;margin-bottom:10px;">`;
+      html += `<tr style="background:#0f3460;">
+        <th style="padding:5px 6px;text-align:left;color:#ff9900;font-size:9px;">Metric</th>
+        <th style="padding:5px 4px;text-align:center;color:#ff9900;font-size:9px;">Value</th>
+        <th style="padding:5px 4px;text-align:center;color:#ff9900;font-size:9px;">Target</th>
+        <th style="padding:5px 4px;text-align:center;color:#ff9900;font-size:9px;">Status</th>
+        <th style="padding:5px 4px;text-align:center;color:#ff9900;font-size:9px;">WoW Trend</th>
+        <th style="padding:5px 4px;text-align:left;color:#ff9900;font-size:9px;">Owner</th>
+      </tr>`;
+
+      metrics.forEach((w, idx) => {
+        const bg = idx % 2 === 0 ? '#1a1a2e' : '#16213e';
+        const displayName = stripSite(w.name);
+        const wowStr = w.change != null ? (w.change > 0 ? `+${w.change.toFixed(2)}%` : `${w.change.toFixed(2)}%`) : '—';
+        const wowColor = (w.change ?? 0) > 0 ? '#2ecc71' : (w.change ?? 0) < 0 ? '#e74c3c' : '#888';
+        const statusColors = { critical: '#e74c3c', warning: '#f39c12', 'on-track': '#27ae60', exceeding: '#2ecc71' };
+        const statusColor = statusColors[w.status] || '#888';
+
+        let statusHtml = '';
+        if (w.pctToTarget && w.pctToTarget.direction) {
+          const dir = w.pctToTarget.direction;
+          const pct = w.pctToTarget.percentage != null ? w.pctToTarget.percentage.toFixed(2) + '%' : '';
+          statusHtml = `<span style="color:${dir === 'ahead' ? '#27ae60' : '#e74c3c'};font-size:9px;">${dir} ${pct}</span>`;
+        } else {
+          statusHtml = `<span style="color:${statusColor};font-size:9px;font-weight:bold;">${(w.status || '?').toUpperCase()}</span>`;
+        }
+
+        html += `<tr style="background:${bg};">
+          <td style="padding:4px 6px;border-bottom:1px solid #2a2a4a;color:#eee;font-weight:bold;">${displayName}</td>
+          <td style="padding:4px 4px;border-bottom:1px solid #2a2a4a;text-align:center;color:#eee;">${w.current != null ? w.current.toFixed(2) : '—'}</td>
+          <td style="padding:4px 4px;border-bottom:1px solid #2a2a4a;text-align:center;color:#ccc;">${w.target ?? '—'}</td>
+          <td style="padding:4px 4px;border-bottom:1px solid #2a2a4a;text-align:center;">${statusHtml}</td>
+          <td style="padding:4px 4px;border-bottom:1px solid #2a2a4a;text-align:center;color:${wowColor};">${wowStr}</td>
+          <td style="padding:4px 6px;border-bottom:1px solid #2a2a4a;color:#ccc;">${w.siteOwner || w.owner || '—'}</td>
+        </tr>`;
+
+        // Actions inline
+        const metricActions = actions.filter(a => a.metric === w.name);
+        if (metricActions.length > 0) {
+          html += `<tr style="background:${bg};">
+            <td colspan="6" style="padding:2px 6px 6px 20px;border-bottom:1px solid #2a2a4a;">`;
+          metricActions.forEach(a => {
+            const isComplete = a.status?.match(/complete|closed|done/i);
+            const isPastDue = !isComplete && a.dueDate && (() => { try { return new Date(a.dueDate) < new Date(); } catch(e) { return false; } })();
+            const borderColor = isPastDue ? '#e74c3c' : isComplete ? '#27ae60' : '#3498db';
+            const statusTag = isComplete ? `<span style="font-size:7px;color:#27ae60;"> [complete]</span>` : isPastDue ? `<span style="font-size:7px;color:#e74c3c;font-weight:bold;"> ⚠ PAST DUE</span>` : '';
+            html += `<div style="font-size:9px;color:#ccc;margin:2px 0;padding:2px 8px;border-left:2px solid ${borderColor};${isPastDue ? 'background:#3d1515;border-radius:2px;' : ''}">
+              <span style="color:#eee;font-weight:bold;">${(a.name || 'Unnamed')}</span>${statusTag}
+              <span style="font-size:8px;color:#999;"> — ${a.assignee || '?'}${a.dueDate ? ` | Due: ${a.dueDate}` : ''}</span>
+            </div>`;
+          });
+          html += `</td></tr>`;
+        }
+      });
+      html += `</table>`;
+
+      // Footer
+      html += `<div style="margin-top:10px;font-size:8px;color:#555;border-top:1px solid #2a2a4a;padding-top:4px;">Generated by RTB Metric Performance Analyzer — Tuesday Cost Doc</div>`;
+      html += `</div>`;
+      return html;
+    }
+
+    // --- WEDNESDAY: OM Sync (brief metrics, actions, comments, 4-week completion chart) ---
+    buildWednesdayVisual(site, dateStr, metrics, actions, comments, trends) {
+      const stripSite = (name) => name.replace(/\s*\([A-Z0-9]+\)\s*$/, '');
+      const behind = metrics.filter(m => m.status === 'critical' || m.status === 'warning');
+      const ahead = metrics.filter(m => m.status === 'on-track' || m.status === 'exceeding');
+
+      let html = `<div style="background:#1a1a2e;color:#eee;padding:16px 20px;width:728px;min-height:600px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:11px;line-height:1.3;">`;
+
+      // Header
+      html += `<div style="border-bottom:2px solid #2ecc71;padding-bottom:8px;margin-bottom:10px;">
+        <div style="font-size:15px;font-weight:bold;color:#2ecc71;">💬 Wednesday OM Sync — ${site}</div>
+        <div style="font-size:9px;color:#888;margin-top:2px;">${dateStr}</div>
+      </div>`;
+
+      // Brief metric summary
+      html += `<div style="display:flex;gap:6px;margin-bottom:12px;">
+        <div style="flex:1;background:#16213e;border-radius:6px;padding:8px 4px;text-align:center;border:1px solid #2a2a4a;">
+          <div style="font-size:18px;font-weight:bold;color:#ff9900;">${metrics.length}</div>
+          <div style="font-size:8px;color:#aaa;">Metrics</div>
+        </div>
+        <div style="flex:1;background:#16213e;border-radius:6px;padding:8px 4px;text-align:center;border:1px solid #2a2a4a;">
+          <div style="font-size:18px;font-weight:bold;color:#27ae60;">${ahead.length}</div>
+          <div style="font-size:8px;color:#aaa;">Ahead</div>
+        </div>
+        <div style="flex:1;background:#16213e;border-radius:6px;padding:8px 4px;text-align:center;border:1px solid #2a2a4a;">
+          <div style="font-size:18px;font-weight:bold;color:#e74c3c;">${behind.length}</div>
+          <div style="font-size:8px;color:#aaa;">Behind</div>
+        </div>
+        <div style="flex:1;background:#16213e;border-radius:6px;padding:8px 4px;text-align:center;border:1px solid #2a2a4a;">
+          <div style="font-size:18px;font-weight:bold;color:#3498db;">${comments.length}</div>
+          <div style="font-size:8px;color:#aaa;">Comments</div>
+        </div>
+      </div>`;
+
+      // Brief metric performance list
+      html += `<div style="font-size:12px;font-weight:bold;color:#ff9900;margin-bottom:6px;">Metric Performance</div>`;
+      metrics.forEach(w => {
+        const displayName = stripSite(w.name);
+        const wowStr = w.change != null ? (w.change > 0 ? `+${w.change.toFixed(2)}%` : `${w.change.toFixed(2)}%`) : '';
+        const wowColor = (w.change ?? 0) > 0 ? '#2ecc71' : (w.change ?? 0) < 0 ? '#e74c3c' : '#888';
+        const statusColors = { critical: '#e74c3c', warning: '#f39c12', 'on-track': '#27ae60', exceeding: '#2ecc71' };
+        const statusColor = statusColors[w.status] || '#888';
+
+        html += `<div style="display:flex;align-items:center;gap:8px;padding:3px 8px;margin:2px 0;background:#16213e;border-radius:4px;border-left:3px solid ${statusColor};">
+          <span style="font-size:10px;font-weight:bold;color:#eee;flex:1;">${displayName}</span>
+          <span style="font-size:9px;color:#ccc;">${w.current != null ? w.current.toFixed(2) : '—'} / ${w.target ?? '—'}</span>
+          <span style="font-size:9px;color:${wowColor};min-width:50px;text-align:right;">${wowStr}</span>
+        </div>`;
+      });
+
+      // Actions section
+      html += `<div style="font-size:12px;font-weight:bold;color:#ff9900;margin:12px 0 6px;">Actions (${actions.length})</div>`;
+      if (actions.length > 0) {
+        actions.forEach(a => {
+          const isComplete = a.status?.match(/complete|closed|done/i);
+          const isPastDue = !isComplete && a.dueDate && (() => { try { return new Date(a.dueDate) < new Date(); } catch(e) { return false; } })();
+          const borderColor = isPastDue ? '#e74c3c' : isComplete ? '#27ae60' : '#3498db';
+          const statusTag = isComplete ? `<span style="font-size:7px;color:#27ae60;"> [complete]</span>` : isPastDue ? `<span style="font-size:7px;color:#e74c3c;font-weight:bold;"> ⚠ PAST DUE</span>` : '';
+          const metricLabel = stripSite(a.metric || '');
+          html += `<div style="font-size:9px;color:#ccc;margin:2px 0;padding:3px 8px;border-left:2px solid ${borderColor};${isPastDue ? 'background:#3d1515;border-radius:2px;' : ''}">
+            <span style="color:#eee;font-weight:bold;">${(a.name || 'Unnamed')}</span>${statusTag}
+            <span style="font-size:8px;color:#888;"> [${metricLabel}]</span>
+            <span style="font-size:8px;color:#999;"> — ${a.assignee || '?'}${a.dueDate ? ` | Due: ${a.dueDate}` : ''}</span>
+          </div>`;
+        });
+      } else {
+        html += `<div style="font-size:9px;color:#888;padding:4px 8px;">No actions loaded.</div>`;
+      }
+
+      // Comments summary
+      html += `<div style="font-size:12px;font-weight:bold;color:#ff9900;margin:12px 0 6px;">Comment Summary</div>`;
+      if (comments.length > 0) {
+        // Group comments by metric
+        const commentsByMetric = {};
+        comments.forEach(c => {
+          const key = c.metric || 'Other';
+          if (!commentsByMetric[key]) commentsByMetric[key] = [];
+          commentsByMetric[key].push(c);
+        });
+        Object.entries(commentsByMetric).forEach(([metric, metricComments]) => {
+          const displayMetric = stripSite(metric);
+          const recent = metricComments.slice(0, 3);
+          html += `<div style="background:#16213e;border-radius:6px;padding:8px 10px;margin:4px 0;border-left:3px solid #3498db;">
+            <div style="font-size:10px;font-weight:bold;color:#3498db;margin-bottom:3px;">${displayMetric} (${metricComments.length} comments)</div>`;
+          recent.forEach(c => {
+            const body = (c.body || c.title || '').substring(0, 120);
+            const date = c.date || c.createdAt || '';
+            html += `<div style="font-size:8px;color:#aaa;margin:2px 0;padding-left:6px;border-left:1px solid #2a2a4a;">
+              <span style="color:#888;">${date ? date + ' — ' : ''}</span>${body}${body.length >= 120 ? '…' : ''}
+            </div>`;
+          });
+          html += `</div>`;
+        });
+      } else {
+        html += `<div style="font-size:9px;color:#888;padding:4px 8px;">No comments loaded.</div>`;
+      }
+
+      // 4-week completion chart (CSS bar chart)
+      html += `<div style="font-size:12px;font-weight:bold;color:#ff9900;margin:12px 0 6px;">4-Week Action Completion</div>`;
+      // Build weekly completion data from trends
+      const now = new Date();
+      const weeks = [];
+      for (let i = 3; i >= 0; i--) {
+        const weekEnd = new Date(now);
+        weekEnd.setDate(weekEnd.getDate() - (i * 7));
+        const weekStart = new Date(weekEnd);
+        weekStart.setDate(weekStart.getDate() - 7);
+        const label = `W${4 - i}`;
+        // Count actions completed in this window (approximate by due date)
+        const completed = actions.filter(a => {
+          if (!a.status?.match(/complete|closed|done/i)) return false;
+          if (!a.dueDate) return i === 0; // if no date, count in current week
+          try {
+            const d = new Date(a.dueDate);
+            return d >= weekStart && d <= weekEnd;
+          } catch(e) { return false; }
+        }).length;
+        const total = actions.filter(a => {
+          if (!a.dueDate) return i === 0;
+          try {
+            const d = new Date(a.dueDate);
+            return d >= weekStart && d <= weekEnd;
+          } catch(e) { return false; }
+        }).length;
+        weeks.push({ label, completed, total });
+      }
+
+      const maxTotal = Math.max(...weeks.map(w => w.total), 1);
+      html += `<div style="display:flex;align-items:flex-end;gap:12px;height:60px;padding:8px 12px;background:#16213e;border-radius:6px;">`;
+      weeks.forEach(w => {
+        const completedHeight = Math.max((w.completed / maxTotal) * 50, 2);
+        const totalHeight = Math.max((w.total / maxTotal) * 50, 4);
+        html += `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;">
+          <div style="font-size:7px;color:#aaa;">${w.completed}/${w.total}</div>
+          <div style="width:100%;position:relative;height:${totalHeight}px;background:#2a2a4a;border-radius:2px;">
+            <div style="position:absolute;bottom:0;left:0;right:0;height:${completedHeight}px;background:#27ae60;border-radius:2px;"></div>
+          </div>
+          <div style="font-size:8px;color:#888;">${w.label}</div>
+        </div>`;
+      });
+      html += `</div>`;
+
+      // Footer
+      html += `<div style="margin-top:10px;font-size:8px;color:#555;border-top:1px solid #2a2a4a;padding-top:4px;">Generated by RTB Metric Performance Analyzer — Wednesday OM Sync</div>`;
+      html += `</div>`;
+      return html;
+    }
+
     copyWeeklySummaryToClipboard(summary, siteLabel) {
       const { total, behind, ahead, highlights, lowlights, improving, declining, wowChanges } = summary;
       const dateStr = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
       const actions = summary.actions || [];
       const comments = this._cachedComments || [];
 
-      const btn = document.getElementById('rtb-copy-summary-btn');
+      const btn = document.querySelector('.rtb-day-btn[data-day="friday"]') || document.getElementById('rtb-copy-summary-btn');
+      if (!btn) return;
       const origText = btn.textContent;
       btn.textContent = '⏳ Rendering...';
       btn.disabled = true;
