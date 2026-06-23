@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RTB Metric Performance Analyzer
 // @namespace    http://tampermonkey.net/
-// @version      1.4.0
+// @version      1.5
 // @description  Analyzes RTB metric performance, provides recommendations, summarizes comments, and identifies trends.
 // @author       jenbre
 // @match        https://rtb.ars-pe.amazon.dev/*
@@ -816,7 +816,7 @@
       // Strategy 1: Look for RTB "Action Plan Comments" tab content
       // The RTB page has tabs: Current Action Plans | Future Action Plans | Action Plan Comments | Resolved Action Plans
       const allText = document.body.textContent;
-
+      
       // Look for comment sections specific to RTB
       const commentContainers = document.querySelectorAll(
         '[class*="comment"], [class*="note"], [class*="annotation"],' +
@@ -836,9 +836,9 @@
         if (!this.isElementVisible(table)) return;
         const headers = Array.from(table.querySelectorAll('thead th, tr:first-child th, tr:first-child td'))
           .map(c => c.textContent.trim().toLowerCase());
-
+        
         // Check if this is a comments table
-        const isCommentTable = headers.some(h =>
+        const isCommentTable = headers.some(h => 
           h.includes('comment') || h.includes('note') || h.includes('update') || h.includes('description')
         );
         if (!isCommentTable) return;
@@ -876,7 +876,7 @@
         if (text.length < 10 || text.length > 2000) return;
         // Skip if it looks like the main table data
         if (text.match(/^(Open|Closed|Variation Reduction|Road To Benchmark)/)) return;
-
+        
         const comment = this.parseComment(el);
         if (comment) this.comments.push(comment);
       });
@@ -2110,25 +2110,20 @@
             <p style="color:#888;font-size:12px;margin:4px 0 0;">Generated ${dateStr}</p>
           </div>
           <div style="display:flex;align-items:center;gap:8px;">
-            <select id="rtb-day-site-selector" style="background:#0f3460;color:#ff9900;border:1px solid #ff9900;border-radius:4px;padding:6px 10px;font-size:12px;cursor:pointer;">
-              <option value="OLM1">OLM1</option>
-              <option value="SBD3">SBD3</option>
-              <option value="SCK8">SCK8</option>
-            </select>
           </div>
         </div>
         <div style="display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;">
           <button class="rtb-export-btn rtb-day-btn" data-day="monday" style="background:#0f3460;border:1px solid #3498db;font-size:12px;padding:8px 14px;">
             📋 MON — Sr Leader Review
           </button>
-          <button class="rtb-export-btn rtb-day-btn" data-day="tuesday" style="background:#0f3460;border:1px solid #27ae60;font-size:12px;padding:8px 14px;">
-            📋 TUE — Cost Doc
-          </button>
           <button class="rtb-export-btn rtb-day-btn" data-day="wednesday" style="background:#0f3460;border:1px solid #2ecc71;font-size:12px;padding:8px 14px;">
             📋 WED — OM Sync
           </button>
           <button class="rtb-export-btn rtb-day-btn" data-day="friday" style="background:#0f3460;border:1px solid #e74c3c;font-size:12px;padding:8px 14px;">
             📋 FRI — Regional Flash
+          </button>
+          <button class="rtb-export-btn rtb-day-btn" data-day="compact" style="background:#0f3460;border:1px solid #9b59b6;font-size:12px;padding:8px 14px;">
+            📊 Compact Overview
           </button>
         </div>`;
 
@@ -2182,8 +2177,7 @@
       document.querySelectorAll('.rtb-day-btn').forEach(btn => {
         btn.addEventListener('click', () => {
           const day = btn.dataset.day;
-          const siteSel = document.getElementById('rtb-day-site-selector');
-          const site = siteSel ? siteSel.value : siteLabel;
+          const site = this._activeSite || document.getElementById('rtb-site-selector')?.value || 'OLM1';
           this.copyDayFormat(day, summary, site, btn);
         });
       });
@@ -2670,35 +2664,65 @@
         return;
       }
 
-      // For MON/TUE/WED, filter data to the selected site
-      const siteMetrics = summary.wowChanges.filter(w => {
+      // Use cached actions if summary.actions is empty (common in region mode)
+      const allActions = (summary.actions && summary.actions.length > 0) ? summary.actions : (this._cachedActions || []);
+
+      // If we're in region mode and have no actions or no comments, fetch them first
+      const needsFetch = (allActions.length === 0 || !(this._cachedComments && this._cachedComments.length > 0));
+      if (needsFetch && this._activeSite === 'NXSD' && !this._fetchingActions) {
+        this._fetchingActions = true;
+        btn.textContent = '⏳ Loading actions...';
+        this.fetchAllActions().then(actionsData => {
+          this._fetchingActions = false;
+          this._cachedActions = actionsData;
+          // Retry with the fetched actions
+          this._copyDayFormatWithData(day, summary, site, btn, origText, actionsData);
+        }).catch(err => {
+          this._fetchingActions = false;
+          console.error('[RTB Analyzer] Error fetching actions for day format:', err);
+          // Proceed without actions
+          this._copyDayFormatWithData(day, summary, site, btn, origText, allActions);
+        });
+        return;
+      }
+
+      this._copyDayFormatWithData(day, summary, site, btn, origText, allActions);
+    }
+
+    _copyDayFormatWithData(day, summary, site, btn, origText, allActions) {
+      // For MON/TUE/WED, filter data to the selected site (or use all for NXSD)
+      const isRegion = (site === 'NXSD');
+      const siteMetrics = isRegion ? summary.wowChanges : summary.wowChanges.filter(w => {
         const match = w.name.match(/\(([A-Z0-9]+)\)\s*$/);
         const metricSite = match ? match[1] : site;
         return metricSite === site;
       });
-      const siteActions = (summary.actions || []).filter(a => {
+      const siteActions = isRegion ? allActions : allActions.filter(a => {
         const match = (a.metric || '').match(/\(([A-Z0-9]+)\)\s*$/);
         const actionSite = match ? match[1] : site;
         return actionSite === site;
       });
-      const siteComments = (this._cachedComments || []).filter(c => {
+      const siteComments = isRegion ? (this._cachedComments || []) : (this._cachedComments || []).filter(c => {
         const match = (c.metric || '').match(/\(([A-Z0-9]+)\)\s*$/);
         const commentSite = match ? match[1] : site;
         return commentSite === site;
       });
-      const siteTrends = (this._cachedTrends || []).filter(t => {
+      console.log('[RTB Analyzer] Day format comments:', (this._cachedComments || []).length, 'total,', siteComments.length, 'for', site);
+      const siteTrends = isRegion ? (this._cachedTrends || []) : (this._cachedTrends || []).filter(t => {
         return (t.path === site || t.site === site);
       });
+
+      const siteLabel = isRegion ? 'NXSD Region' : site;
 
       const dateStr = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
       let visualHtml = '';
 
       if (day === 'monday') {
-        visualHtml = this.buildMondayVisual(site, dateStr, siteMetrics, siteActions);
-      } else if (day === 'tuesday') {
-        visualHtml = this.buildTuesdayVisual(site, dateStr, siteMetrics, siteActions);
+        visualHtml = this.buildMondayVisual(siteLabel, dateStr, siteMetrics, siteActions);
       } else if (day === 'wednesday') {
-        visualHtml = this.buildWednesdayVisual(site, dateStr, siteMetrics, siteActions, siteComments, siteTrends);
+        visualHtml = this.buildWednesdayVisual(siteLabel, dateStr, siteMetrics, siteActions, siteComments, siteTrends);
+      } else if (day === 'compact') {
+        visualHtml = this.buildCompactOverview(siteLabel, dateStr, siteMetrics, siteActions, siteComments, siteTrends);
       }
 
       // Render and capture as image
@@ -2721,7 +2745,8 @@
             if (blob && navigator.clipboard && navigator.clipboard.write) {
               try {
                 await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-                btn.textContent = '✅ Copied! Ctrl+V in Word';
+                this.openScreenshotInTab(canvas);
+                btn.textContent = '✅ Copied & Opened!';
                 btn.disabled = false;
                 setTimeout(() => { btn.textContent = origText; }, 3000);
               } catch (clipErr) {
@@ -2749,6 +2774,9 @@
 
     // --- MONDAY: Sr Leader Review (detailed actions + metrics) ---
     buildMondayVisual(site, dateStr, metrics, actions) {
+      console.log('[RTB Analyzer] Monday actions before filter:', actions.length, '| statuses:', JSON.stringify([...new Set(actions.map(a => a.status))]));
+      actions = actions.filter(a => !a.status || !a.status.match(/^(completed|complete|closed|done)$/i));
+      console.log('[RTB Analyzer] Monday actions after filter:', actions.length);
       const stripSite = (name) => name.replace(/\s*\([A-Z0-9]+\)\s*$/, '');
       const behind = metrics.filter(m => m.status === 'critical' || m.status === 'warning');
       const ahead = metrics.filter(m => m.status === 'on-track' || m.status === 'exceeding');
@@ -2853,7 +2881,9 @@
 
     // --- TUESDAY: Cost Doc (similar to weekly summary, single site) ---
     buildTuesdayVisual(site, dateStr, metrics, actions) {
+      actions = actions.filter(a => !a.status || !a.status.match(/^(completed|complete|closed|done)$/i));
       const stripSite = (name) => name.replace(/\s*\([A-Z0-9]+\)\s*$/, '');
+      const isRegion = site === 'NXSD Region' || site === 'NXSD';
       const behind = metrics.filter(m => m.status === 'critical' || m.status === 'warning');
       const ahead = metrics.filter(m => m.status === 'on-track' || m.status === 'exceeding');
       const improving = metrics.filter(m => (m.change ?? 0) > 0);
@@ -2884,63 +2914,86 @@
       });
       html += `</div>`;
 
-      // Metrics table
-      html += `<div style="font-size:12px;font-weight:bold;color:#ff9900;margin-bottom:6px;">Metric Details</div>`;
-      html += `<table style="width:100%;border-collapse:collapse;font-size:10px;margin-bottom:10px;">`;
-      html += `<tr style="background:#0f3460;">
-        <th style="padding:5px 6px;text-align:left;color:#ff9900;font-size:9px;">Metric</th>
-        <th style="padding:5px 4px;text-align:center;color:#ff9900;font-size:9px;">Value</th>
-        <th style="padding:5px 4px;text-align:center;color:#ff9900;font-size:9px;">Target</th>
-        <th style="padding:5px 4px;text-align:center;color:#ff9900;font-size:9px;">Status</th>
-        <th style="padding:5px 4px;text-align:center;color:#ff9900;font-size:9px;">WoW Trend</th>
-        <th style="padding:5px 4px;text-align:left;color:#ff9900;font-size:9px;">Owner</th>
-      </tr>`;
+      // Group metrics by site if region mode
+      const siteGroups = isRegion ? {} : { [site]: metrics };
+      if (isRegion) {
+        metrics.forEach(w => {
+          const match = w.name.match(/\(([A-Z0-9]+)\)\s*$/);
+          const metricSite = match ? match[1] : 'Other';
+          if (!siteGroups[metricSite]) siteGroups[metricSite] = [];
+          siteGroups[metricSite].push(w);
+        });
+      }
 
-      metrics.forEach((w, idx) => {
-        const bg = idx % 2 === 0 ? '#1a1a2e' : '#16213e';
-        const displayName = stripSite(w.name);
-        const wowStr = w.change != null ? (w.change > 0 ? `+${w.change.toFixed(2)}%` : `${w.change.toFixed(2)}%`) : '—';
-        const wowColor = (w.change ?? 0) > 0 ? '#2ecc71' : (w.change ?? 0) < 0 ? '#e74c3c' : '#888';
-        const statusColors = { critical: '#e74c3c', warning: '#f39c12', 'on-track': '#27ae60', exceeding: '#2ecc71' };
-        const statusColor = statusColors[w.status] || '#888';
-
-        let statusHtml = '';
-        if (w.pctToTarget && w.pctToTarget.direction) {
-          const dir = w.pctToTarget.direction;
-          const pct = w.pctToTarget.percentage != null ? w.pctToTarget.percentage.toFixed(2) + '%' : '';
-          statusHtml = `<span style="color:${dir === 'ahead' ? '#27ae60' : '#e74c3c'};font-size:9px;">${dir} ${pct}</span>`;
+      // Render metrics table grouped by site
+      for (const [groupSite, groupMetrics] of Object.entries(siteGroups)) {
+        if (isRegion) {
+          const groupBehind = groupMetrics.filter(m => m.status === 'critical' || m.status === 'warning').length;
+          const groupAhead = groupMetrics.filter(m => m.status === 'on-track' || m.status === 'exceeding').length;
+          html += `<div style="font-size:13px;font-weight:bold;color:#3498db;margin:12px 0 6px;padding:6px 10px;background:#0f3460;border-radius:4px;border-left:4px solid #3498db;">
+            ${groupSite} — ${groupMetrics.length} metrics
+            <span style="color:#27ae60;margin-left:8px;">${groupAhead} ahead</span>
+            <span style="color:#e74c3c;margin-left:8px;">${groupBehind} behind</span>
+          </div>`;
         } else {
-          statusHtml = `<span style="color:${statusColor};font-size:9px;font-weight:bold;">${(w.status || '?').toUpperCase()}</span>`;
+          html += `<div style="font-size:12px;font-weight:bold;color:#ff9900;margin-bottom:6px;">Metric Details</div>`;
         }
 
-        html += `<tr style="background:${bg};">
-          <td style="padding:4px 6px;border-bottom:1px solid #2a2a4a;color:#eee;font-weight:bold;">${displayName}</td>
-          <td style="padding:4px 4px;border-bottom:1px solid #2a2a4a;text-align:center;color:#eee;">${w.current != null ? w.current.toFixed(2) : '—'}</td>
-          <td style="padding:4px 4px;border-bottom:1px solid #2a2a4a;text-align:center;color:#ccc;">${w.target ?? '—'}</td>
-          <td style="padding:4px 4px;border-bottom:1px solid #2a2a4a;text-align:center;">${statusHtml}</td>
-          <td style="padding:4px 4px;border-bottom:1px solid #2a2a4a;text-align:center;color:${wowColor};">${wowStr}</td>
-          <td style="padding:4px 6px;border-bottom:1px solid #2a2a4a;color:#ccc;">${w.siteOwner || w.owner || '—'}</td>
+        html += `<table style="width:100%;border-collapse:collapse;font-size:10px;margin-bottom:10px;">`;
+        html += `<tr style="background:#0f3460;">
+          <th style="padding:5px 6px;text-align:left;color:#ff9900;font-size:9px;">Metric</th>
+          <th style="padding:5px 4px;text-align:center;color:#ff9900;font-size:9px;">Value</th>
+          <th style="padding:5px 4px;text-align:center;color:#ff9900;font-size:9px;">Target</th>
+          <th style="padding:5px 4px;text-align:center;color:#ff9900;font-size:9px;">Status</th>
+          <th style="padding:5px 4px;text-align:center;color:#ff9900;font-size:9px;">WoW Trend</th>
+          <th style="padding:5px 4px;text-align:left;color:#ff9900;font-size:9px;">Owner</th>
         </tr>`;
 
-        // Actions inline
-        const metricActions = actions.filter(a => a.metric === w.name);
-        if (metricActions.length > 0) {
+        groupMetrics.forEach((w, idx) => {
+          const bg = idx % 2 === 0 ? '#1a1a2e' : '#16213e';
+          const displayName = stripSite(w.name);
+          const wowStr = w.change != null ? (w.change > 0 ? `+${w.change.toFixed(2)}%` : `${w.change.toFixed(2)}%`) : '—';
+          const wowColor = (w.change ?? 0) > 0 ? '#2ecc71' : (w.change ?? 0) < 0 ? '#e74c3c' : '#888';
+          const statusColors = { critical: '#e74c3c', warning: '#f39c12', 'on-track': '#27ae60', exceeding: '#2ecc71' };
+          const statusColor = statusColors[w.status] || '#888';
+
+          let statusHtml = '';
+          if (w.pctToTarget && w.pctToTarget.direction) {
+            const dir = w.pctToTarget.direction;
+            const pct = w.pctToTarget.percentage != null ? w.pctToTarget.percentage.toFixed(2) + '%' : '';
+            statusHtml = `<span style="color:${dir === 'ahead' ? '#27ae60' : '#e74c3c'};font-size:9px;">${dir} ${pct}</span>`;
+          } else {
+            statusHtml = `<span style="color:${statusColor};font-size:9px;font-weight:bold;">${(w.status || '?').toUpperCase()}</span>`;
+          }
+
           html += `<tr style="background:${bg};">
-            <td colspan="6" style="padding:2px 6px 6px 20px;border-bottom:1px solid #2a2a4a;">`;
-          metricActions.forEach(a => {
-            const isComplete = a.status?.match(/complete|closed|done/i);
-            const isPastDue = !isComplete && a.dueDate && (() => { try { return new Date(a.dueDate) < new Date(); } catch(e) { return false; } })();
-            const borderColor = isPastDue ? '#e74c3c' : isComplete ? '#27ae60' : '#3498db';
-            const statusTag = isComplete ? `<span style="font-size:7px;color:#27ae60;"> [complete]</span>` : isPastDue ? `<span style="font-size:7px;color:#e74c3c;font-weight:bold;"> ⚠ PAST DUE</span>` : '';
-            html += `<div style="font-size:9px;color:#ccc;margin:2px 0;padding:2px 8px;border-left:2px solid ${borderColor};${isPastDue ? 'background:#3d1515;border-radius:2px;' : ''}">
-              <span style="color:#eee;font-weight:bold;">${(a.name || 'Unnamed')}</span>${statusTag}
-              <span style="font-size:8px;color:#999;"> — ${a.assignee || '?'}${a.dueDate ? ` | Due: ${a.dueDate}` : ''}</span>
-            </div>`;
-          });
-          html += `</td></tr>`;
-        }
-      });
-      html += `</table>`;
+            <td style="padding:4px 6px;border-bottom:1px solid #2a2a4a;color:#eee;font-weight:bold;">${displayName}</td>
+            <td style="padding:4px 4px;border-bottom:1px solid #2a2a4a;text-align:center;color:#eee;">${w.current != null ? w.current.toFixed(2) : '—'}</td>
+            <td style="padding:4px 4px;border-bottom:1px solid #2a2a4a;text-align:center;color:#ccc;">${w.target ?? '—'}</td>
+            <td style="padding:4px 4px;border-bottom:1px solid #2a2a4a;text-align:center;">${statusHtml}</td>
+            <td style="padding:4px 4px;border-bottom:1px solid #2a2a4a;text-align:center;color:${wowColor};">${wowStr}</td>
+            <td style="padding:4px 6px;border-bottom:1px solid #2a2a4a;color:#ccc;">${w.siteOwner || w.owner || '—'}</td>
+          </tr>`;
+
+          // Actions inline
+          const metricActions = actions.filter(a => a.metric === w.name);
+          if (metricActions.length > 0) {
+            html += `<tr style="background:${bg};">
+              <td colspan="6" style="padding:2px 6px 6px 20px;border-bottom:1px solid #2a2a4a;">`;
+            metricActions.forEach(a => {
+              const isPastDue = a.dueDate && (() => { try { return new Date(a.dueDate) < new Date(); } catch(e) { return false; } })();
+              const borderColor = isPastDue ? '#e74c3c' : '#3498db';
+              const statusTag = isPastDue ? `<span style="font-size:7px;color:#e74c3c;font-weight:bold;"> ⚠ PAST DUE</span>` : '';
+              html += `<div style="font-size:9px;color:#ccc;margin:2px 0;padding:2px 8px;border-left:2px solid ${borderColor};${isPastDue ? 'background:#3d1515;border-radius:2px;' : ''}">
+                <span style="color:#eee;font-weight:bold;">${(a.name || 'Unnamed')}</span>${statusTag}
+                <span style="font-size:8px;color:#999;"> — ${a.assignee || '?'}${a.dueDate ? ` | Due: ${a.dueDate}` : ''}</span>
+              </div>`;
+            });
+            html += `</td></tr>`;
+          }
+        });
+        html += `</table>`;
+      }
 
       // Footer
       html += `<div style="margin-top:10px;font-size:8px;color:#555;border-top:1px solid #2a2a4a;padding-top:4px;">Generated by RTB Metric Performance Analyzer — Tuesday Cost Doc</div>`;
@@ -2950,6 +3003,7 @@
 
     // --- WEDNESDAY: OM Sync (brief metrics, actions, comments, 4-week completion chart) ---
     buildWednesdayVisual(site, dateStr, metrics, actions, comments, trends) {
+      actions = actions.filter(a => !a.status || !a.status.match(/^(completed|complete|closed|done)$/i));
       const stripSite = (name) => name.replace(/\s*\([A-Z0-9]+\)\s*$/, '');
       const behind = metrics.filter(m => m.status === 'critical' || m.status === 'warning');
       const ahead = metrics.filter(m => m.status === 'on-track' || m.status === 'exceeding');
@@ -3045,6 +3099,9 @@
         html += `<div style="font-size:9px;color:#888;padding:4px 8px;">No comments loaded.</div>`;
       }
 
+      // Weekly Comment Tracker — Who's Updating?
+      html += this.buildWednesdayCommentTracker(comments);
+
       // 4-week completion chart (CSS bar chart)
       html += `<div style="font-size:12px;font-weight:bold;color:#ff9900;margin:12px 0 6px;">4-Week Action Completion</div>`;
       // Build weekly completion data from trends
@@ -3096,10 +3153,250 @@
       return html;
     }
 
+    buildCompactOverview(site, dateStr, metrics, actions, comments, trends) {
+      actions = actions.filter(a => !a.status || !a.status.match(/^(completed|complete|closed|done)$/i));
+      const stripSite = (name) => name.replace(/\s*\([A-Z0-9]+\)\s*$/, '');
+      const now = new Date();
+
+      // Cross-reference with analysisResults for fields not on wowChanges
+      const findOriginalMetric = (name) => {
+        return (this.analysisResults || []).find(m => m.name === name) || {};
+      };
+
+      // Calculate days dwelling for a date string
+      const daysSince = (dateStr) => {
+        if (!dateStr) return null;
+        try {
+          const d = new Date(dateStr);
+          if (isNaN(d.getTime())) return null;
+          return Math.floor((now - d) / (1000 * 60 * 60 * 24));
+        } catch (e) { return null; }
+      };
+
+      let html = `<div style="background:#1a1a2e;color:#eee;padding:16px 20px;width:728px;min-height:400px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:10px;line-height:1.3;">`;
+
+      // Header
+      html += `<div style="border-bottom:2px solid #9b59b6;padding-bottom:6px;margin-bottom:10px;">
+        <div style="font-size:14px;font-weight:bold;color:#9b59b6;">📊 Compact Overview — ${site}</div>
+        <div style="font-size:8px;color:#888;margin-top:2px;">${dateStr} | ${metrics.length} open metrics</div>
+      </div>`;
+
+      // Determine if region mode — group by site
+      const isRegion = site === 'NXSD Region' || site === 'NXSD';
+      const siteGroups = {};
+      if (isRegion) {
+        metrics.forEach(m => {
+          const match = m.name.match(/\(([A-Z0-9]+)\)\s*$/);
+          const metricSite = match ? match[1] : 'Other';
+          if (!siteGroups[metricSite]) siteGroups[metricSite] = [];
+          siteGroups[metricSite].push(m);
+        });
+      } else {
+        siteGroups[site] = metrics;
+      }
+
+      // Render a table per site group
+      const renderMetricTable = (groupMetrics) => {
+        let tbl = `<table style="width:100%;border-collapse:collapse;font-size:9px;">`;
+        tbl += `<tr style="background:#0f3460;">
+          <th style="padding:5px 6px;text-align:left;color:#ff9900;font-size:8px;">Metric</th>
+          <th style="padding:5px 4px;text-align:center;color:#ff9900;font-size:8px;">Days Open</th>
+          <th style="padding:5px 4px;text-align:center;color:#ff9900;font-size:8px;">Glidepath</th>
+          <th style="padding:5px 4px;text-align:center;color:#ff9900;font-size:8px;">WoW</th>
+          <th style="padding:5px 4px;text-align:center;color:#ff9900;font-size:8px;">Open Actions</th>
+          <th style="padding:5px 4px;text-align:center;color:#ff9900;font-size:8px;">Last Comment</th>
+        </tr>`;
+
+        groupMetrics.forEach((m, idx) => {
+          const bg = idx % 2 === 0 ? '#1a1a2e' : '#16213e';
+          const metricName = stripSite(m.name);
+          const original = findOriginalMetric(m.name);
+
+          // Days open from startDate on the original metric
+          const startDate = original.startDate || m.startDate;
+          const daysOpen = daysSince(startDate);
+          const daysOpenStr = daysOpen != null ? `${daysOpen}d` : '—';
+          const daysOpenColor = daysOpen != null && daysOpen > 90 ? '#e74c3c' : daysOpen != null && daysOpen > 60 ? '#f39c12' : '#aaa';
+
+          // Glidepath status from pctToGlidepath field (% to Glidepath column)
+          // Falls back to pctToTarget if glidepath data not available (API mode)
+          const pctToGlidepath = original.pctToGlidepath || m.pctToGlidepath || original.pctToTarget || m.pctToTarget;
+          let gpHtml = '—';
+          if (pctToGlidepath && pctToGlidepath.direction) {
+            const dir = pctToGlidepath.direction;
+            const pct = pctToGlidepath.percentage != null ? pctToGlidepath.percentage.toFixed(2) + '%' : '';
+            gpHtml = `<span style="color:${dir === 'ahead' ? '#27ae60' : '#e74c3c'};font-weight:bold;">${dir === 'ahead' ? '✓' : '✗'} ${pct}</span>`;
+          }
+
+          // WoW trend — use 'change' from wowChanges or wowTrend from original
+          const wowVal = m.change ?? original.wowTrend ?? m.wowTrend;
+          let wowHtml = '—';
+          if (wowVal != null) {
+            const wowColor = wowVal > 0 ? '#27ae60' : wowVal < 0 ? '#e74c3c' : '#888';
+            wowHtml = `<span style="color:${wowColor};">${wowVal > 0 ? '+' : ''}${wowVal.toFixed(2)}</span>`;
+          }
+
+          // Open actions for this metric
+          const metricActions = actions.filter(a => a.metric === m.name);
+          const openCount = metricActions.length;
+
+          // Last comment date for this metric
+          const metricComments = (comments || []).filter(c => c.metric === m.name);
+          let lastCommentStr = '—';
+          let lastCommentColor = '#e74c3c';
+          if (metricComments.length > 0) {
+            const dates = metricComments.map(c => {
+              const ts = c.timestamp || c.createdAt;
+              return ts ? new Date(ts) : null;
+            }).filter(d => d && !isNaN(d.getTime()));
+            if (dates.length > 0) {
+              const latest = new Date(Math.max(...dates));
+              const daysAgo = Math.floor((now - latest) / (1000 * 60 * 60 * 24));
+              lastCommentStr = `${daysAgo}d ago`;
+              lastCommentColor = daysAgo <= 7 ? '#27ae60' : daysAgo <= 14 ? '#f39c12' : '#e74c3c';
+            }
+          }
+
+          // Metric row
+          tbl += `<tr style="background:${bg};">
+            <td style="padding:4px 6px;border-bottom:1px solid #2a2a4a;color:#eee;font-weight:bold;">${metricName}</td>
+            <td style="padding:4px 4px;border-bottom:1px solid #2a2a4a;text-align:center;color:${daysOpenColor};font-weight:bold;">${daysOpenStr}</td>
+            <td style="padding:4px 4px;border-bottom:1px solid #2a2a4a;text-align:center;">${gpHtml}</td>
+            <td style="padding:4px 4px;border-bottom:1px solid #2a2a4a;text-align:center;">${wowHtml}</td>
+            <td style="padding:4px 4px;border-bottom:1px solid #2a2a4a;text-align:center;color:#3498db;font-weight:bold;">${openCount}</td>
+            <td style="padding:4px 4px;border-bottom:1px solid #2a2a4a;text-align:center;color:${lastCommentColor};">${lastCommentStr}</td>
+          </tr>`;
+
+          // Action detail sub-rows
+          if (metricActions.length > 0) {
+            metricActions.forEach(a => {
+              const actionDays = daysSince(a.startDate || a.createdDate || a.dueDate);
+              const actionDaysStr = actionDays != null ? `${actionDays}d` : '—';
+              const dueDate = a.dueDate || '—';
+              let overdue = false;
+              if (a.dueDate) {
+                try { overdue = new Date(a.dueDate) < now; } catch (e) {}
+              }
+              const dueColor = overdue ? '#e74c3c' : '#aaa';
+              const overdueTag = overdue ? ' ⚠' : '';
+
+              tbl += `<tr style="background:${bg};">
+                <td style="padding:2px 6px 2px 20px;border-bottom:1px solid #222;color:#bbb;font-size:8px;">↳ ${a.name || 'Unnamed'} <span style="color:#888;">(${a.assignee || '?'})</span></td>
+                <td style="padding:2px 4px;border-bottom:1px solid #222;text-align:center;color:#aaa;font-size:8px;">${actionDaysStr}</td>
+                <td colspan="2" style="padding:2px 4px;border-bottom:1px solid #222;text-align:center;color:${dueColor};font-size:8px;">Due: ${dueDate}${overdueTag}</td>
+                <td style="padding:2px 4px;border-bottom:1px solid #222;text-align:center;color:${overdue ? '#e74c3c' : '#27ae60'};font-size:8px;font-weight:bold;">${overdue ? 'OVERDUE' : 'OK'}</td>
+                <td style="padding:2px 4px;border-bottom:1px solid #222;"></td>
+              </tr>`;
+            });
+          }
+        });
+
+        tbl += `</table>`;
+        return tbl;
+      };
+
+      // Render each site group
+      for (const [groupSite, groupMetrics] of Object.entries(siteGroups)) {
+        if (isRegion) {
+          html += `<div style="font-size:12px;font-weight:bold;color:#3498db;margin:10px 0 6px;padding:5px 10px;background:#0f3460;border-radius:4px;border-left:4px solid #3498db;">${groupSite} — ${groupMetrics.length} metrics</div>`;
+        }
+        html += renderMetricTable(groupMetrics);
+      }
+
+      // Footer
+      html += `<div style="margin-top:10px;font-size:8px;color:#555;border-top:1px solid #2a2a4a;padding-top:4px;">Generated by RTB Metric Performance Analyzer — Compact Overview</div>`;
+      html += `</div>`;
+      return html;
+    }
+
+    buildWednesdayCommentTracker(comments) {
+      const getFiscalWeekStart = (date) => {
+        const d = new Date(date);
+        const day = d.getDay();
+        d.setDate(d.getDate() - day);
+        d.setHours(0, 0, 0, 0);
+        return d;
+      };
+
+      const now = new Date();
+      const currentWeekStart = getFiscalWeekStart(now);
+
+      const weeks = [];
+      for (let w = 0; w < 4; w++) {
+        const start = new Date(currentWeekStart);
+        start.setDate(start.getDate() - (w * 7));
+        const end = new Date(start);
+        end.setDate(end.getDate() + 6);
+        end.setHours(23, 59, 59, 999);
+        weeks.push({ start, end, label: `WK ${start.getMonth() + 1}/${start.getDate()}` });
+      }
+      weeks.reverse();
+
+      const weekAuthors = weeks.map(() => ({}));
+      const allAuthors = new Set();
+
+      comments.forEach(c => {
+        if (!c.author && !c.createdBy) return;
+        const ts = c.timestamp || c.createdAt;
+        if (!ts) return;
+        const d = new Date(ts);
+        if (isNaN(d.getTime())) return;
+        const author = (c.author || c.createdBy || '').trim();
+        if (!author) return;
+        allAuthors.add(author);
+
+        for (let i = 0; i < weeks.length; i++) {
+          if (d >= weeks[i].start && d <= weeks[i].end) {
+            weekAuthors[i][author] = (weekAuthors[i][author] || 0) + 1;
+            break;
+          }
+        }
+      });
+
+      const sortedAuthors = [...allAuthors].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+
+      if (sortedAuthors.length === 0) {
+        return `<div style="font-size:12px;font-weight:bold;color:#f39c12;margin:12px 0 6px;">📋 Weekly Comment Tracker — Who's Updating?</div>
+          <div style="font-size:9px;color:#888;padding:4px 8px;">No author/timestamp data available.</div>`;
+      }
+
+      let tbl = `<div style="font-size:12px;font-weight:bold;color:#3498db;margin:12px 0 6px;">📋 Weekly Comment Tracker — Who's Updating?</div>`;
+      tbl += `<div style="font-size:8px;color:#888;margin-bottom:4px;">Tracks which ops managers added comments each fiscal week (Sun–Sat). ✅ = commented, ❌ = no comment found.</div>`;
+      tbl += `<table style="width:100%;border-collapse:collapse;font-size:9px;margin-bottom:10px;">`;
+      tbl += `<tr style="background:#0f3460;">
+        <th style="padding:4px 6px;text-align:left;color:#ff9900;font-size:8px;">Author</th>`;
+      weeks.forEach(w => {
+        tbl += `<th style="padding:4px 4px;text-align:center;color:#ff9900;font-size:8px;">${w.label}</th>`;
+      });
+      tbl += `<th style="padding:4px 4px;text-align:center;color:#ff9900;font-size:8px;">Weeks Active</th></tr>`;
+
+      sortedAuthors.forEach((author, idx) => {
+        const bg = idx % 2 === 0 ? '#1a1a2e' : '#16213e';
+        let activeCount = 0;
+        tbl += `<tr style="background:${bg};"><td style="padding:3px 6px;border-bottom:1px solid #2a2a4a;color:#eee;font-weight:bold;">${author}</td>`;
+        weeks.forEach((_, i) => {
+          const count = weekAuthors[i][author] || 0;
+          if (count > 0) {
+            activeCount++;
+            tbl += `<td style="padding:3px 4px;border-bottom:1px solid #2a2a4a;text-align:center;"><span style="color:#2ecc71;">✅</span><span style="font-size:7px;color:#aaa;"> (${count})</span></td>`;
+          } else {
+            tbl += `<td style="padding:3px 4px;border-bottom:1px solid #2a2a4a;text-align:center;"><span style="color:#e74c3c;">❌</span></td>`;
+          }
+        });
+        const pct = (activeCount / weeks.length) * 100;
+        const scoreColor = pct === 100 ? '#2ecc71' : pct >= 50 ? '#f39c12' : '#e74c3c';
+        tbl += `<td style="padding:3px 4px;border-bottom:1px solid #2a2a4a;text-align:center;color:${scoreColor};font-weight:bold;">${activeCount}/${weeks.length}</td>`;
+        tbl += `</tr>`;
+      });
+
+      tbl += `</table>`;
+      return tbl;
+    }
+
     copyWeeklySummaryToClipboard(summary, siteLabel) {
       const { total, behind, ahead, highlights, lowlights, improving, declining, wowChanges } = summary;
       const dateStr = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
-      const actions = summary.actions || [];
+      const actions = (summary.actions && summary.actions.length > 0) ? summary.actions : (this._cachedActions || []);
       const comments = this._cachedComments || [];
 
       const btn = document.querySelector('.rtb-day-btn[data-day="friday"]') || document.getElementById('rtb-copy-summary-btn');
@@ -3140,7 +3437,8 @@
                 await navigator.clipboard.write([
                   new ClipboardItem({ 'image/png': blob })
                 ]);
-                btn.textContent = '✅ Copied! Ctrl+V in Word';
+                this.openScreenshotInTab(canvas);
+                btn.textContent = '✅ Copied & Opened!';
                 btn.disabled = false;
                 setTimeout(() => { btn.textContent = origText; }, 3000);
               } catch (clipErr) {
@@ -3167,6 +3465,7 @@
     }
 
     buildPrintVisual(siteLabel, dateStr, total, ahead, behind, improving, declining, allMetrics, actions, comments) {
+      actions = actions.filter(a => !a.status || !a.status.match(/^(completed|complete|closed|done)$/i));
       const behindCount = behind.length;
       const aheadCount = ahead.length;
       const improvingCount = improving.length;
@@ -4997,6 +5296,9 @@
         const ap0 = actionPlans[0];
         console.log('[RTB Analyzer] API response sample keys:', Object.keys(ap0).join(', '));
         console.log('[RTB Analyzer] Potential ID fields:', ap0.actionPlanId || ap0.id || ap0._id || ap0.planId || ap0.uuid || 'NONE FOUND');
+        console.log('[RTB Analyzer] targetInfo:', JSON.stringify(ap0.targetInfo));
+        console.log('[RTB Analyzer] performance keys:', ap0.performance ? Object.keys(ap0.performance).join(', ') : 'N/A');
+        console.log('[RTB Analyzer] performance sample:', JSON.stringify({ wowTrend: ap0.performance?.wowTrend, pctToGlidepath: ap0.performance?.percentToGlidepath, glidepathStatus: ap0.performance?.glidepathStatus, glidePathPct: ap0.performance?.glidePathPct }));
       }
 
       // Parse API response into our metric format
@@ -5006,10 +5308,16 @@
         const latestWeekly = weeklyData.length > 0 ? weeklyData[weeklyData.length - 1]?.value : null;
         const target = ap.targetInfo?.target;
         const pctToTarget = ap.targetInfo?.percentToTarget;
+        const pctToGlidepath = ap.performance?.percentToGlidepathTarget ?? null;
+        const glidePathStatus = ap.performance?.glidePathStatus || '';
 
         // Determine status
         let status = 'unknown';
-        if (latestWeekly && target) {
+        if (glidePathStatus) {
+          const gpLower = glidePathStatus.toLowerCase();
+          if (gpLower.includes('behind')) status = 'warning';
+          else if (gpLower.includes('ahead')) status = 'on-track';
+        } else if (latestWeekly && target) {
           if (latestWeekly >= target) status = 'on-track';
           else if (latestWeekly >= target * 0.9) status = 'warning';
           else status = 'critical';
@@ -5029,7 +5337,9 @@
           startDate: ap.startDate,
           wowTrend: perf.wowTrend,
           dodTrend: perf.dodTrend,
-          pctToTarget: pctToTarget ? { direction: pctToTarget >= 0 ? 'ahead' : 'behind', percentage: Math.abs(pctToTarget) } : null,
+          pctToTarget: pctToTarget && pctToTarget !== 50 ? { direction: pctToTarget >= 0 ? 'ahead' : 'behind', percentage: Math.abs(pctToTarget) } : null,
+          pctToGlidepath: pctToGlidepath != null ? { direction: glidePathStatus.toLowerCase().includes('behind') ? 'behind' : 'ahead', percentage: Math.abs(pctToGlidepath) } : null,
+          glidePathStatus,
           weeklyData,
         };
       });
